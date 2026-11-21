@@ -1,0 +1,189 @@
+#!/bin/sh
+# Fake ffprobe for tests: emits canned JSON based on the input file's base
+# name. Real binaries never run in the test suite.
+argv="$*"
+last=""
+for arg in "$@"; do
+  last="$arg"
+done
+base=$(basename "$last")
+
+# The legacy duration probe asks for a plain, non-JSON value.
+case "$argv" in
+  *format=duration*)
+    case "$base" in
+      vertical_short.mp4) echo "45.230000" ;;
+      landscape_4k.mp4)   echo "612.500000" ;;
+      silent_clip.mov)    echo "12.000000" ;;
+      ffmpeg_fail.mp4)    echo "12.000000" ;;
+      *) echo "12.000000" ;;
+    esac
+    exit 0
+    ;;
+esac
+
+case "$base" in
+  vertical_short.mp4)
+    cat <<'JSON'
+{
+  "streams": [
+    {
+      "codec_type": "video",
+      "codec_name": "h264",
+      "width": 3840,
+      "height": 2160,
+      "avg_frame_rate": "30/1",
+      "r_frame_rate": "30/1",
+      "duration": "45.230000",
+      "side_data_list": [
+        {"side_data_type": "Display Matrix", "rotation": -90}
+      ]
+    },
+    {
+      "codec_type": "audio",
+      "codec_name": "aac",
+      "duration": "45.230000"
+    }
+  ],
+  "format": {"duration": "45.230000"}
+}
+JSON
+    ;;
+  landscape_4k.mp4)
+    cat <<'JSON'
+{
+  "streams": [
+    {
+      "codec_type": "video",
+      "codec_name": "hevc",
+      "width": 3840,
+      "height": 2160,
+      "avg_frame_rate": "60000/1001",
+      "r_frame_rate": "60000/1001",
+      "duration": "612.500000"
+    },
+    {
+      "codec_type": "audio",
+      "codec_name": "aac",
+      "duration": "612.500000"
+    }
+  ],
+  "format": {"duration": "612.500000"}
+}
+JSON
+    ;;
+  silent_clip.mov)    cat <<'JSON'
+{
+  "streams": [
+    {
+      "codec_type": "video",
+      "codec_name": "h264",
+      "width": 1280,
+      "height": 720,
+      "avg_frame_rate": "24/1",
+      "r_frame_rate": "24/1",
+      "duration": "12.000000"
+    }
+  ],
+  "format": {"duration": "12.000000"}
+}
+JSON
+    ;;
+  frame_rotation.mp4)
+    cat <<'JSON'
+{
+  "streams": [
+    {
+      "codec_type": "video",
+      "codec_name": "h264",
+      "width": 1920,
+      "height": 1080,
+      "avg_frame_rate": "30/1",
+      "r_frame_rate": "30/1",
+      "duration": "8.000000"
+    },
+    {"codec_type": "audio", "codec_name": "aac"}
+  ],
+  "frames": [
+    {
+      "side_data_list": [
+        {"side_data_type": "3x3 displaymatrix", "rotation": -90}
+      ]
+    }
+  ],
+  "format": {"duration": "8.000000"}
+}
+JSON
+    ;;
+  tag_rotation.mov)
+    cat <<'JSON'
+{
+  "streams": [
+    {
+      "codec_type": "video",
+      "codec_name": "h264",
+      "width": 1080,
+      "height": 1920,
+      "avg_frame_rate": "25/1",
+      "r_frame_rate": "25/1",
+      "duration": "8.000000",
+      "tags": {"rotate": "90"}
+    },
+    {"codec_type": "audio", "codec_name": "aac"}
+  ],
+  "format": {"duration": "8.000000"}
+}
+JSON
+    ;;
+  missing_fields.mp4)
+    cat <<'JSON'
+{
+  "streams": [
+    {
+      "codec_type": "video",
+      "codec_name": "h264",
+      "avg_frame_rate": "30/1",
+      "duration": "12.000000"
+    }
+  ],
+  "format": {"duration": "12.000000"}
+}
+JSON
+    ;;
+  no_video.mp4)
+    cat <<'JSON'
+{
+  "streams": [
+    {"codec_type": "audio", "codec_name": "aac"}
+  ],
+  "format": {"duration": "12.000000"}
+}
+JSON
+    ;;
+  probe_fail.mp4)
+    echo "fake ffprobe: forced failure" >&2
+    exit 1
+    ;;
+  ffmpeg_fail.mp4)
+    cat <<'JSON'
+{
+  "streams": [
+    {
+      "codec_type": "video",
+      "codec_name": "h264",
+      "width": 1920,
+      "height": 1080,
+      "avg_frame_rate": "30/1",
+      "r_frame_rate": "30/1",
+      "duration": "12.000000"
+    }
+  ],
+  "format": {"duration": "12.000000"}
+}
+JSON
+    ;;
+  *)
+    echo "fake ffprobe: unknown fixture $base" >&2
+    exit 2
+    ;;
+esac

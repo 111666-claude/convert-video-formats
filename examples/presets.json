@@ -1,0 +1,46 @@
+{
+  "rules": [
+    {
+      "name": "vertical-shorts",
+      "match": {
+        "orientation": "portrait",
+        "max_duration": 120,
+        "has_audio": true
+      },
+      "preset": {
+        "container": "mp4",
+        "video_codec": "libx264",
+        "max_scale_width": 1080,
+        "max_scale_height": 1920,
+        "quality": "medium"
+      }
+    },
+    {
+      "name": "silent-clips",
+      "match": {
+        "has_audio": false,
+        "max_duration": 60
+      },
+      "preset": {
+        "container": "webm",
+        "video_codec": "libvpx-vp9",
+        "max_scale_width": 1280,
+        "quality": "low"
+      }
+    },
+    {
+      "name": "4k-landscape",
+      "match": {
+        "orientation": "landscape",
+        "min_width": 3000
+      },
+      "preset": {
+        "container": "mkv",
+        "video_codec": "libx264",
+        "max_scale_width": 1920,
+        "max_scale_height": 1080,
+        "quality": "high"
+      }
+    }
+  ]
+}

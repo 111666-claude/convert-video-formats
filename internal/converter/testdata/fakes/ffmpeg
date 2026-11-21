@@ -1,0 +1,35 @@
+#!/bin/sh
+# Fake ffmpeg for tests: records its full argument list to FAKE_FFMPEG_LOG
+# (one line per invocation), creates the output file so the progress monitor
+# has something to stat, and emits one -progress marker. Inputs whose base
+# name contains "ffmpeg_fail" exit non-zero to simulate an encoding failure.
+
+argv="$*"
+
+input_path=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-i" ]; then
+    input_path="$arg"
+  fi
+  prev="$arg"
+done
+# The final positional argument is the output path.
+output_path="$arg"
+
+if [ -n "$FAKE_FFMPEG_LOG" ]; then
+  printf '%s\n' "$argv" >> "$FAKE_FFMPEG_LOG"
+fi
+
+echo "out_time_us=1000000"
+
+case "$(basename "$input_path")" in
+  *ffmpeg_fail*)
+    echo "fake ffmpeg: forced failure for $input_path" >&2
+    exit 1
+    ;;
+esac
+
+mkdir -p "$(dirname "$output_path")" 2>/dev/null || true
+: > "$output_path" 2>/dev/null || true
+exit 0

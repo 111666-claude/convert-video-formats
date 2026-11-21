@@ -9,6 +9,12 @@ type ConversionOptions struct {
 	Overwrite   bool
 	Concurrent  int
 	IsDirectory bool
+	// PresetsPath is the path to a conditional transcoding preset config.
+	// When empty, conversion uses the original fixed-parameter behavior.
+	PresetsPath string
+	// Preview only reports per-file probe results, rule decisions and the
+	// ffmpeg commands that would run, without converting anything.
+	Preview bool
 }
 
 // VideoFormat represents supported video formats

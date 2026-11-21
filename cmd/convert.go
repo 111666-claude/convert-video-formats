@@ -3,22 +3,26 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"runtime"
 
 	"github.com/spf13/cobra"
 	"github.com/vib795/convert-video-formats/internal/converter"
+	"github.com/vib795/convert-video-formats/internal/presets"
 	"github.com/vib795/convert-video-formats/internal/progress"
 	"github.com/vib795/convert-video-formats/internal/utils"
 	"github.com/vib795/convert-video-formats/pkg/types"
 )
 
 var (
-	inputPath  string
-	format     string
-	outputPath string
-	quality    string
-	overwrite  bool
-	concurrent int
+	inputPath   string
+	format      string
+	outputPath  string
+	quality     string
+	overwrite   bool
+	concurrent  int
+	presetsPath string
+	preview     bool
 )
 
 // convertCmd represents the convert command
@@ -60,6 +64,8 @@ func init() {
 	convertCmd.Flags().StringVarP(&quality, "quality", "q", "medium", "Quality preset (high, medium, low)")
 	convertCmd.Flags().BoolVar(&overwrite, "overwrite", false, "Overwrite existing output files")
 	convertCmd.Flags().IntVarP(&concurrent, "concurrent", "c", runtime.NumCPU(), "Number of concurrent conversions for batch processing")
+	convertCmd.Flags().StringVarP(&presetsPath, "presets", "p", "", "Path to a conditional transcoding preset config (JSON); rules choose encoder, scale and container per file")
+	convertCmd.Flags().BoolVar(&preview, "preview", false, "Print per-file probe data, rule decisions and ffmpeg commands without converting")
 
 	convertCmd.MarkFlagRequired("format")
 }
@@ -68,8 +74,13 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	// Register signal handler for graceful terminal cleanup
 	progress.RegisterCleanupHandler()
 
-	// Check all dependencies (ffmpeg, ffprobe, etc.) with helpful error messages
-	if err := utils.CheckAllDependencies(); err != nil {
+	// Preview only needs ffprobe; skip the ffmpeg runtime dependency check.
+	if !preview {
+		// Check all dependencies (ffmpeg, ffprobe, etc.) with helpful error messages
+		if err := utils.CheckAllDependencies(); err != nil {
+			return err
+		}
+	} else if err := checkFFprobe(); err != nil {
 		return err
 	}
 
@@ -100,6 +111,15 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		outputPath = expandedOutput
 	}
 
+	var expandedPresets string
+	if presetsPath != "" {
+		expanded, err := utils.ExpandPath(presetsPath)
+		if err != nil {
+			return fmt.Errorf("failed to expand preset path: %w", err)
+		}
+		expandedPresets = expanded
+	}
+
 	// Validate format
 	if !utils.IsValidFormat(format) {
 		return fmt.Errorf("unsupported format: %s. Supported formats: mp4, avi, mov, mkv, webm, flv", format)
@@ -115,21 +135,44 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("input path does not exist: %s\n\nTip: If your path contains spaces, wrap it in quotes:\n  convert-vid convert --input \"path with spaces/video.mp4\" -f mp4", input)
 	}
 
+	// Load and validate the conditional preset config, if one was given.
+	var engine *presets.Engine
+	if expandedPresets != "" {
+		cfg, err := presets.Load(expandedPresets)
+		if err != nil {
+			return err
+		}
+		engine = presets.NewEngine(cfg)
+	}
+
 	// Create conversion options
 	opts := &types.ConversionOptions{
-		InputPath:  input,
-		OutputPath: outputPath,
-		Format:     format,
-		Quality:    quality,
-		Overwrite:  overwrite,
-		Concurrent: concurrent,
+		InputPath:   input,
+		OutputPath:  outputPath,
+		Format:      format,
+		Quality:     quality,
+		Overwrite:   overwrite,
+		Concurrent:  concurrent,
+		PresetsPath: expandedPresets,
+		Preview:     preview,
 	}
 
 	// Create converter and run
 	conv := converter.NewConverter(opts)
-	if err := conv.Convert(); err != nil {
-		return err
+	if engine != nil {
+		conv.WithPresets(engine)
 	}
 
+	if preview {
+		return conv.Preview()
+	}
+	return conv.Convert()
+}
+
+// checkFFprobe verifies ffprobe alone, which is all preview mode requires.
+func checkFFprobe() error {
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		return fmt.Errorf("ffprobe is not installed (usually bundled with ffmpeg).\n\nPlease install ffmpeg to use --preview")
+	}
 	return nil
 }

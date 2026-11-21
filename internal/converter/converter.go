@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/vib795/convert-video-formats/internal/presets"
+	"github.com/vib795/convert-video-formats/internal/probe"
 	"github.com/vib795/convert-video-formats/internal/progress"
 	"github.com/vib795/convert-video-formats/internal/utils"
 	"github.com/vib795/convert-video-formats/pkg/types"
@@ -22,13 +24,34 @@ import (
 // Converter handles video conversion operations
 type Converter struct {
 	options *types.ConversionOptions
+	// engine evaluates conditional preset rules. nil means no preset
+	// config was supplied and the original fixed-parameter behavior runs.
+	engine *presets.Engine
+	// prober inspects media files; it is overridable in tests.
+	prober probe.Prober
 }
 
 // NewConverter creates a new Converter instance
 func NewConverter(opts *types.ConversionOptions) *Converter {
 	return &Converter{
 		options: opts,
+		prober:  probe.NewFFprobe(),
 	}
+}
+
+// WithPresets attaches a validated preset engine so conversions are chosen
+// per file by the ordered rules. Without it the converter behaves exactly
+// as before.
+func (c *Converter) WithPresets(engine *presets.Engine) *Converter {
+	c.engine = engine
+	return c
+}
+
+// WithProber replaces the ffprobe-backed prober (used by tests with a fake
+// ffprobe).
+func (c *Converter) WithProber(prober probe.Prober) *Converter {
+	c.prober = prober
+	return c
 }
 
 // Convert performs the conversion based on the options
@@ -50,6 +73,85 @@ func (c *Converter) Convert() error {
 	return c.convertSingleFile(c.options.InputPath, c.options.OutputPath)
 }
 
+// Preview resolves and prints the decision for each input file without
+// running ffmpeg. Probe or rule errors are reported per file and, for
+// directories, summarized as a single error at the end.
+func (c *Converter) Preview() error {
+	info, err := os.Stat(c.options.InputPath)
+	if err != nil {
+		return fmt.Errorf("input path does not exist: %w", err)
+	}
+
+	var files []string
+	if info.IsDir() {
+		files, err = utils.GetVideoFiles(c.options.InputPath)
+		if err != nil {
+			return fmt.Errorf("failed to read directory: %w", err)
+		}
+		if len(files) == 0 {
+			return fmt.Errorf("no video files found in %s", c.options.InputPath)
+		}
+	} else {
+		files = []string{c.options.InputPath}
+	}
+
+	failures := 0
+	for i, file := range files {
+		if i > 0 {
+			fmt.Println()
+		}
+		fmt.Printf("== %s ==\n", filepath.Base(file))
+		if err := c.previewFile(file, info.IsDir()); err != nil {
+			failures++
+			progress.Warning(err.Error())
+		}
+	}
+
+	if failures > 0 {
+		return fmt.Errorf("%d file(s) could not be previewed", failures)
+	}
+	return nil
+}
+
+// previewFile handles one file in preview mode.
+func (c *Converter) previewFile(inputPath string, inputIsDir bool) error {
+	media, err := c.prober.Probe(inputPath)
+	if err != nil {
+		return fmt.Errorf("probe failed: %w", err)
+	}
+
+	if c.engine == nil {
+		fmt.Printf("probe: %dx%d stored, %dx%d display (rotation %d), %.3f fps, %.2fs, audio=%t\n",
+			media.Width, media.Height, media.DisplayWidth(), media.DisplayHeight(),
+			media.Rotation, media.FPS, media.Duration, media.HasAudio)
+		fmt.Printf("decision: no preset config supplied, default conversion to %s (%s quality)\n",
+			c.options.Format, c.options.Quality)
+		return nil
+	}
+
+	decision := c.engine.Decide(media)
+	fmt.Print(decision.Explain())
+
+	if !decision.Matched {
+		return nil
+	}
+
+	outputPath, err := c.planOutputPath(inputPath, c.options.OutputPath, decision.Preset.Container, inputIsDir)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("output: %s\n", outputPath)
+	if utils.FileExists(outputPath) {
+		if c.options.Overwrite {
+			fmt.Println("output: file exists and will be overwritten (--overwrite)")
+		} else {
+			progress.Warning(fmt.Sprintf("output file already exists: %s (conversion would be refused without --overwrite)", outputPath))
+		}
+	}
+	fmt.Printf("ffmpeg %s\n", strings.Join(c.buildPresetArgs(inputPath, outputPath, decision), " "))
+	return nil
+}
+
 // convertSingleFile converts a single video file
 func (c *Converter) convertSingleFile(inputPath, outputPath string) error {
 	// Validate input file
@@ -61,6 +163,16 @@ func (c *Converter) convertSingleFile(inputPath, outputPath string) error {
 	inputCodec := utils.GetInputVideoCodec(inputPath)
 	if inputCodec == "av1" && !utils.HasAV1DecoderSupport() {
 		return fmt.Errorf("cannot convert AV1 video: %s\n\n%s", filepath.Base(inputPath), utils.GetAV1ErrorMessage())
+	}
+
+	// When a preset engine is configured and a rule matches, the rule's
+	// encoder, scale cap and target container take precedence.
+	plan, err := c.buildPlan(inputPath, outputPath, false)
+	if err != nil {
+		return err
+	}
+	if plan != nil {
+		return c.runPlannedConversion(plan)
 	}
 
 	// Generate output path if not specified
@@ -259,6 +371,15 @@ func (c *Converter) convertFileWorkerWithBatchProgress(inputPath, outputDir stri
 		result.Error = fmt.Errorf("AV1 decoder not available. Run: brew reinstall ffmpeg")
 		batchProgress.CompleteFile(baseName, false)
 		return result
+	}
+
+	// A matching preset rule decides encoder, scale and container per file.
+	if plan, err := c.buildPlan(inputPath, outputDir, true); err != nil {
+		result.Error = err
+		batchProgress.CompleteFile(baseName, false)
+		return result
+	} else if plan != nil {
+		return c.runPlannedConversionBatch(plan, baseName, batchProgress)
 	}
 
 	// Check if output exists
@@ -549,7 +670,13 @@ func (c *Converter) getFileSize(path string) int64 {
 // microseconds) from its -progress output. This is the actual progress through
 // the video, unlike output file size, which depends on codec and quality.
 func (c *Converter) startFFmpegWithProgress(inputPath, outputPath string) (*exec.Cmd, *atomic.Int64, error) {
-	cmd := exec.Command("ffmpeg", c.buildFFmpegArgs(inputPath, outputPath)...)
+	return c.startFFmpegWithArgs(c.buildFFmpegArgs(inputPath, outputPath))
+}
+
+// startFFmpegWithArgs starts ffmpeg with an explicit argument list, used by
+// both the legacy and the preset-driven conversion paths.
+func (c *Converter) startFFmpegWithArgs(args []string) (*exec.Cmd, *atomic.Int64, error) {
+	cmd := exec.Command("ffmpeg", args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, nil, err

@@ -38,6 +38,10 @@ test_videos/
 *.webm
 *.flv
 
+# Empty placeholder fixtures used by the fake ffprobe/ffmpeg test harness
+!internal/converter/testdata/fixtures/
+!internal/converter/testdata/fixtures/**
+
 converted/**/*
 Archive.zip
 demo.tape

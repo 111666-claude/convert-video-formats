@@ -8,6 +8,7 @@ A fast and efficient command-line tool for converting video files between differ
 - **Batch Conversion**: Convert entire directories of videos concurrently
 - **Multiple Formats**: Support for mp4, avi, mov, mkv, webm, flv
 - **Quality Presets**: Choose between high, medium, and low quality settings
+- **Conditional Transcoding Presets**: Match ordered rules against dimensions, frame rate, duration and audio track to pick encoder, scaling cap and container per file, with a dry-run preview
 - **Progress Tracking**: Visual feedback during conversion
 - **Concurrent Processing**: Multi-threaded batch conversions for faster processing
 - **Simple CLI**: Easy-to-use command-line interface
@@ -142,6 +143,8 @@ convert-vid convert [input] [flags]
 | `--output` | `-o` | Output file or directory path (use quotes for paths with spaces) | Auto-generated |
 | `--quality` | `-q` | Quality preset (high, medium, low) | medium |
 | `--concurrent` | `-c` | Number of concurrent conversions for batch | CPU count |
+| `--presets` | `-p` | Conditional transcoding preset config (JSON) | none |
+| `--preview` | | Print per-file probe data, rule decisions and ffmpeg commands without converting | false |
 | `--overwrite` | | Overwrite existing output files | false |
 | `--help` | `-h` | Show help | |
 
@@ -186,6 +189,91 @@ convert-vid convert ./videos -f mp4 -c 4 -o ./output
 convert-vid convert ./videos -f mp4 -q high --overwrite
 ```
 
+## Conditional Transcoding Presets
+
+A single parameter set wastes space on short vertical clips and under-compresses 4K landscape footage. A preset config (JSON) lets each file pick its own encoder, scaling cap and target container from ordered rules matched against ffprobe metadata.
+
+### Previewing decisions first
+
+`--preview` probes every input and prints the decision trail without invoking ffmpeg:
+
+```bash
+convert-vid convert ./videos -f mp4 -p presets.json --preview
+```
+
+```
+== vertical_short.mp4 ==
+probe: 3840x2160 stored, 2160x3840 display (rotation 270), 30.000 fps, 45.23s, audio=true
+  rule "vertical-shorts": MATCH
+decision: rule "vertical-shorts" -> container=mp4 video=libx264 audio=aac quality=medium
+scale: 2160x3840 -> 1080x1920 (aspect ratio preserved, only downscaling)
+output: videos/vertical_short.mp4
+ffmpeg -nostdin -noautorotate -i ... -c:v libx264 -c:a aac -vf scale=1920:1080:flags=lanczos -n ...
+```
+
+Rules are evaluated **in file order; the first match wins**, and every skipped rule records why. A file no rule matches falls back to the normal `--format`/`--quality` conversion, so a partial config is safe. Without `--presets` the tool behaves exactly as before.
+
+### Config format
+
+A complete example ships in [`examples/presets.json`](examples/presets.json).
+
+```json
+{
+  "rules": [
+    {
+      "name": "vertical-shorts",
+      "match": {
+        "orientation": "portrait",
+        "max_duration": 120,
+        "has_audio": true
+      },
+      "preset": {
+        "container": "mp4",
+        "video_codec": "libx264",
+        "max_scale_width": 1080,
+        "max_scale_height": 1920,
+        "quality": "medium"
+      }
+    }
+  ]
+}
+```
+
+**Match conditions** — all present conditions must hold; omitted ones impose no constraint. Dimensions are compared against the *display* dimensions (after rotation):
+
+| Field | Meaning |
+|---|---|
+| `orientation` | `portrait`, `landscape` or `square` |
+| `min_width` / `max_width` | display width bounds in pixels |
+| `min_height` / `max_height` | display height bounds in pixels |
+| `min_fps` / `max_fps` | average frame-rate bounds |
+| `min_duration` / `max_duration` | duration bounds in seconds |
+| `has_audio` | `true` requires an audio stream, `false` requires none |
+
+**Preset actions**:
+
+| Field | Meaning |
+|---|---|
+| `container` | target container: `mp4`, `avi`, `mov`, `mkv`, `webm`, `flv` |
+| `video_codec` | `libx264` or `libvpx-vp9` |
+| `audio_codec` | optional; defaults to `aac` (`libopus` for WebM). Silent sources get `-an` instead |
+| `max_scale_width` / `max_scale_height` | optional even-pixel caps; sources are only downscaled, never upscaled |
+| `quality` | `high`, `medium` (default) or `low` |
+
+### Aspect ratio and rotation
+
+- Scaling preserves aspect ratio and rounds to even pixels (required by H.264/YUV 4:2:0).
+- Rotation metadata is never baked or dropped: rotated inputs are probed by display dimensions, scaled on the correct swapped axes, and passed `-noautorotate` so the display matrix is copied to the output.
+- A rule whose container matches the input extension auto-names the output `name_converted.ext`, mirroring the built-in same-name guard.
+
+### Validation errors
+
+Config loading fails fast, before any file is touched, on: duplicate or missing rule names, unknown JSON fields, inverted bounds, unsupported containers/codecs/quality values, and scale caps that are negative, odd or below 2. Other explicit outcomes:
+
+- **Missing probe fields** (no video stream, no dimensions/frame rate/duration): the file is reported with a `probe data missing required field` error and skipped in batch runs.
+- **ffprobe/ffmpeg failure**: surfaced as `ffprobe failed` / `ffmpeg conversion failed` with the underlying cause.
+- **Output already exists**: refused with an `already exists` message unless `--overwrite` is given (also flagged in `--preview`).
+
 ## Supported Formats
 
 ### Input Formats
@@ -226,7 +314,12 @@ convert-vid-format/
 │   └── convert.go         # Convert command implementation
 ├── internal/
 │   ├── converter/
-│   │   └── converter.go   # Core conversion logic
+│   │   ├── converter.go   # Core conversion logic
+│   │   └── preset_plan.go # Conditional preset planning and ffmpeg args
+│   ├── presets/
+│   │   └── presets.go     # Ordered rule config, validation and matching
+│   ├── probe/
+│   │   └── probe.go       # ffprobe metadata wrapper
 │   ├── progress/
 │   │   └── progress.go    # Progress indicators
 │   └── utils/
